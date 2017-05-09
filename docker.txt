@@ -1,0 +1,323 @@
+安装
+centos
+ 前提：内核必须为3.0以上、x64系统
+
+通过以下命令查看您的 CentOS 内核：
+
+uname -r
+
+如果执行以上命令后，输出的内核版本号低于 3.8，请参考下面的方法来来升级您的 Linux 内核。
+
+对于 CentOS 6.5 而言，内核版本默认是 2.6。首先，可通过以下命令安装最新内核：
+
+rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+rpm -ivh http://www.elrepo.org/elrepo-release-6-5.el6.elrepo.noarch.rpm
+yum -y --enablerepo=elrepo-kernel install kernel-lt
+
+随后，编辑以下配置文件：
+
+vi /etc/grub.conf
+
+将default=1修改为default=0。
+
+最后，通过reboot命令重启操作系统。
+
+重启后如果不出意外的话，再次查看内核，您的 CentOS 内核将会显示为 3.10。
+
+如果到这里，您和我们所期望的结果是一致的。恭喜您！下面我们就一起来安装 Docker 了。
+安装 Docker
+
+只需通过以下命令即可安装 Docker 软件：
+
+rpm -Uvh http://download.fedoraproject.org/pub/epel/6/i386/epel-release-6-8.noarch.rpm
+yum -y install docker-io
+
+可使用以下命令，查看 Docker 是否安装成功：
+docker version
+docker -d
+yum install libdevmapper.so.1.02
+若输出了 Docker 的版本号，则说明安装成功，我们下面就可以开始使用 Docker 了。
+
+可通过以下命令启动 Docker 服务：
+
+service docker start
+
+docker run centos
+
+
+
+Ubuntu
+ 一、安装Docker的先决条件
+
+1、运行64位CPU构架的计算机（目前只能是x86_64和amd64），请注意，Docker目前不支持32位CPU。
+2、运行Linux 3.8或更高版本内核。一些老版本的2.6.x或其后的内核也能够运行Docker，但运行结果会有很大的不同。而且，如果你需要就老版本内核寻求帮助时，通常大家会建议你升级到更高版本的内核。
+3、内核必须支持一种适合的存储驱动（storage driver），例如：
+Device Manage；AUFS；vfs；btrfs；ZFS
+默认存储驱动通常是Device Mapper或AUFS
+4、内核必须支持并开启cgroup和命名空间（namespace）功能。
+
+检查Ubuntu内核版本
+[zhaojq@virtual-machine]# uname -a
+Linux ubuntu 4.4.0-21-generic #37-Ubuntu SMP Mon Apr 18 18:33:37 UTC 2016 x86_64 x86_64 x86_64 GNU/Linux
+检查Device Mapper
+[zhaojq@virtual-machine]# ls -l /sys/class/misc/device-mapper 
+lrwxrwxrwx 1 root root 0 Jun 20 22:42 /sys/class/misc/device-mapper -> ../../devices/virtual/misc/device-mapper
+
+二、安装Docker
+添加Docker的ATP仓库
+[zhaojq@virtual-machine]# sudo sh -c "echo deb https://apt.dockerproject.org/repo ubuntu-trusty main > /etc/apt/sources.list.d/docker.list"
+[zhaojq@virtual-machine]# whereis curl
+curl: /usr/bin/curl /usr/share/man/man1/curl.1.gz
+
+增加Docker仓库的新GPG密钥
+[zhaojq@virtual-machine]# sudo apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+Executing: /tmp/tmp.Uskaff1gz8/gpg.1.sh --keyserver
+hkp://p80.pool.sks-keyservers.net:80
+--recv-keys
+58118E89F3A912897C070ADBF76221572C52609D
+gpg: 下载密钥‘2C52609D’，从 hkp 服务器 p80.pool.sks-keyservers.net
+gpg: 密钥 2C52609D：公钥“Docker Release Tool (releasedocker) <docker@docker.com>”已导入
+gpg: 合计被处理的数量：1
+gpg: 已导入：1  (RSA: 1)
+
+
+更新APT软件包索引
+[zhaojq@virtual-machine]# sudo apt-get update
+
+安装Docker
+[zhaojq@virtual-machine]# sudo lsb_release --codename | cut -f2       
+xenial
+[zhaojq@virtual-machine]# sudo sh -c "echo deb https://apt.dockerproject.org/repo ubuntu-xenial main > /etc/apt/sources.list.d/docker.list"
+[zhaojq@virtual-machine]# cat /etc/apt/sources.list.d/docker.list
+deb https://apt.dockerproject.org/repo ubuntu-xenial main
+[zhaojq@virtual-machine]# sudo apt-get update 
+[zhaojq@virtual-machine]# sudo apt-get install docker-engine
+[zhaojq@virtual-machine]# sudo docker info
+
+
+1.安装ubuntu 维护的版本
+  sudo apt-get install docker.io
+  source /etc/bash_completion.d/docker.io
+2.安装docker 维护的版本（较新）
+ 首先得满足两个条件：
+  系统内核大于3.8  x64
+
+ 3.不使用sudo 运行docker
+ sudo groupadd docker
+ sudo gpasswd -a xiaopeng docker
+ sudo service docker restart
+
+
+
+
+
+
+
+
+一、docker 的基本组成：
+    docker 客户端/守护进程
+    docker 镜像 （打包阶段）
+    docker 容器（通过镜像启动、启动和执行阶段）
+    docker 仓库（共有dockerHub、私有）
+二、相关命令
+1. 查看docker信息（version、info）
+# 查看docker版本  
+$docker version  
+  
+# 显示docker系统的信息  
+$docker info  
+
+2. 对image的操作（search、pull、images、rmi、history）
+# 检索image  
+$docker search image_name  
+  
+# 下载image  
+$docker pull image_name  
+  
+# 列出镜像列表; -a, --all=false Show all images; --no-trunc=false Don't truncate output; -q, --quiet=false Only show numeric IDs  
+$docker images  
+  
+# 删除一个或者多个镜像; -f, --force=false Force; --no-prune=false Do not delete untagged parents  
+$docker rmi image_name  
+  
+# 显示一个镜像的历史; --no-trunc=false Don't truncate output; -q, --quiet=false Only show numeric IDs  
+$docker history image_name  
+
+3. 启动容器（run）
+docker容器可以理解为在沙盒中运行的进程。这个沙盒包含了该进程运行所必须的资源，包括文件系统、系统类库、shell 环境等等。但这个沙盒默认是不会运行任何程序的。你需要在沙盒中运行一个进程来启动某一个容器。这个进程是该容器的唯一进程，所以当该进程结束的时候，容器也会完全的停止。
+# 在容器中运行"echo"命令，输出"hello word"  
+$docker run image_name echo "hello word"  
+  
+# 交互式进入容器中  
+$docker run -i -t image_name /bin/bash  
+  
+  
+# 在容器中安装新的程序  
+$docker run image_name apt-get install -y app_name  
+
+
+Note：  在执行apt-get 命令的时候，要带上-y参数。如果不指定-y参数的话，apt-get命令会进入交互模式，需要用户输入命令来进行确认，但在docker环境中是无法响应这种交互的。apt-get 命令执行完毕之后，容器就会停止，但对容器的改动不会丢失。
+
+
+4. 查看容器（ps）
+# 列出当前所有正在运行的container  
+$docker ps  
+# 列出所有的container  
+$docker ps -a  
+# 列出最近一次启动的container  
+$docker ps -l  
+
+**************************************************************************
+查看运行容器的IP地址：
+sudo docker inspect  -f '{{.NetworkSettings.IPAddress}}' a9d6bc（容器ID）
+**************************************************************************
+
+5. 保存对容器的修改（commit）
+
+当你对某一个容器做了修改之后（通过在容器中运行某一个命令），可以把对容器的修改保存下来，这样下次可以从保存后的最新状态运行该容器。
+# 保存对容器的修改; -a, --author="" Author; -m, --message="" Commit message  
+$docker commit ID new_image_name  
+
+
+Note：  image相当于类，container相当于实例，不过可以动态给实例安装新软件，然后把这个container用commit命令固化成一个image。
+
+
+
+
+
+6. 对容器的操作（rm、stop、start、kill、logs、diff、top、cp、restart、attach）
+
+# 删除所有容器  
+$docker rm `docker ps -a -q`  
+  
+# 删除单个容器; -f, --force=false; -l, --link=false Remove the specified link and not the underlying container; -v, --volumes=false Remove the volumes associated to the container  
+$docker rm Name/ID  
+  
+# 停止、启动、杀死一个容器  
+$docker stop Name/ID  
+$docker start Name/ID  
+$docker kill Name/ID  
+  
+# 从一个容器中取日志; -f, --follow=false Follow log output; -t, --timestamps=false Show timestamps  
+$docker logs Name/ID  
+  
+# 列出一个容器里面被改变的文件或者目录，list列表会显示出三种事件，A 增加的，D 删除的，C 被改变的  
+$docker diff Name/ID  
+  
+# 显示一个运行的容器里面的进程信息  
+$docker top Name/ID  
+  
+# 从容器里面拷贝文件/目录到本地一个路径  
+$docker cp Name:/container_path to_path  
+$docker cp ID:/container_path to_path  
+  
+# 重启一个正在运行的容器; -t, --time=10 Number of seconds to try to stop for before killing the container, Default=10  
+$docker restart Name/ID  
+  
+# 附加到一个运行的容器上面; --no-stdin=false Do not attach stdin; --sig-proxy=true Proxify all received signal to the process  
+$docker attach ID  
+
+
+Note： attach命令允许你查看或者影响一个运行的容器。你可以在同一时间attach同一个容器。你也可以从一个容器中脱离出来，是从CTRL-C。
+
+
+
+
+
+7. 保存和加载镜像（save、load）
+
+
+当需要把一台机器上的镜像迁移到另一台机器的时候，需要保存镜像与加载镜像。
+# 保存镜像到一个tar包; -o, --output="" Write to an file  
+$docker save image_name -o file_path  
+# 加载一个tar包格式的镜像; -i, --input="" Read from a tar archive file  
+$docker load -i file_path  
+  
+# 机器a  
+$docker save image_name > /home/save.tar  
+# 使用scp将save.tar拷到机器b上，然后：  
+$docker load < /home/save.tar  
+
+8、 登录registry server（login）
+# 登陆registry server; -e, --email="" Email; -p, --password="" Password; -u, --username="" Username  
+$docker login  
+
+
+9. 发布image（push）
+# 发布docker镜像  
+$docker push new_image_name  
+
+
+10.  根据Dockerfile 构建出一个容器
+
+#build  
+      --no-cache=false Do not use cache when building the image  
+      -q, --quiet=false Suppress the verbose output generated by the containers  
+      --rm=true Remove intermediate containers after a successful build  
+      -t, --tag="" Repository name (and optionally a tag) to be applied to the resulting image in case of success  
+$docker build -t image_name Dockerfile_path
+
+
+
+
+三、Docker技术原理
+ Namespace  是一种Linux内核技术，用来实现资源的隔离
+   主要隔离：文件系统、PID、UTS、网络、用户
+ CGroup   
+   资源限制（内存、cpu）、优先级控制、资源统计、进程控制
+
+
+四、docker 网络
+ （1）容器拥有独立的网络
+
+
+
+
+
+**********************************************************************************************************************
+希云Docker培训笔记
+docker run  -P(重启后端口映射会变化)
+            -p（重启后端口映射不会变化）
+
+
+
+docker run -d -p 80:80 --name wordpress  -e WORDPRESS_DB_HOST=192.168.239.136 -e WORDPRESS_DB_USER=admin -e WORDPRESS_DB_PASSWORD=csphere2015 csphere/wordpress:4.2
+
+
+Jenkins
+  docker build -t csphere/php-fpm:5.4 $WORKSPACE/php-fpm
+身份验证令牌
+  java-token
+
+docker run -d -p 8080:8080 --name jenkins -v /usr/bin/docker:/usr/bin/docker -v /var/run/docker.sock:/var/run/docker.sock -v /root/maven-tar:/root csphere/jenkins:1.609
+
+
+
+
+REGISTRY_URL=192.168.239.135
+cp /home/xiaopeng/apache-maven-3.5.0-bin.tar.gz $WORKSPACE/maven
+docker build -t csphere/maveb:3.5.0 $WORKSPACE/maven
+if docker ps -a | grep -i maven ; then
+   docker rm -f maven
+fi
+docker create --name maven csphere/maven:3.5.0
+docker cp maven:/hello/target/hello.war $WORKSPACE/hello
+docker build -t $REGISTRY_URL/csphere/hello:1.0 $WORKSPACE/hello
+docker push $REGISTRY_URL/csphere/hellp:1.0
+if docker ps -a | grep -i hello; then
+   docker rm -f hello
+fi
+docker run -d -p 80:8080 --name hello $REGISTRY_URL/csphere/hello:1.0
+
+
+
+
+
+
+
+
+
+
+
+
+   
