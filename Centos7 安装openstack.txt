@@ -1,0 +1,1698 @@
+参考文档：http://docs.openstack.org/mitaka/zh_CN/install-guide-rdo/environment.html
+一、环境介绍
+*********************************           ************************************************
+*        Controller              *          *              Computer                        *
+*ip: 192.168.1.228/24            *          * ip: 192.168.1.229/24                         *
+*hosts: controller 192.168.1.228 *          *                                              *   
+*       computer   192.168.1.229 *          * hosts:controoler 191.168.1.228               *
+*                                *          *       computer   192.168.1.229               *
+*ntpservice:202.120.2.101        *          *  ntpservice:controller                       *
+*********************************           ************************************************
+二、搭建本地yum源：
+(1)安装http服务：yum  install httpd -y
+(2)将Mitaka版本地源包上次至htppd服务根目录/var/www/html
+(3)修改CentOS-Base.repo添加Openstack本地源：
+  [Centos-openstack-mitaka]
+  
+  name=openstack-mitaka   
+  
+  baseurl=http://192.168.1.228/openstack-mitaka/ 
+ 
+  enabled=1  
+ 
+  gpgcheck=0
+(4)yum cleanall
+   yum make cache
+  启动httpd并访问测试
+  http://http://192.168.1.228/openstack-mitaka/ 
+三、安装openstack基本环境
+（1）安装 OpenStack 客户端
+# yum install python-openstackclient
+（2）RHEL 和 CentOS 默认启用了 SELinux . 安装 openstack-selinux 软件包以便自动管理 OpenStack 服务的安全策略:
+# yum install openstack-selinux
+ 
+（3）Mysql
+ yum install mariadb mariadb-server python2-PyMySQL
+ [mysqld]
+bind-address = 192.168.1.228
+default-storage-engine = innodb
+innodb_file_per_table
+max_connections = 4096
+collation-server = utf8_general_ci
+character-set-server = utf8
+启动数据库服务，并将其配置为开机自启
+# systemctl enable mariadb.service
+# systemctl start mariadb.service
+为了保证数据库服务的安全性，运行``mysql_secure_installation``脚本。为数据库的root用户设置一个适当的密码。
+# mysql_secure_installation
+（4）NoSQL 数据库
+Telemetry 服务使用 NoSQL 数据库来存储信息，典型地，这个数据库运行在控制节点上，向导中使用MongoDB。
+1.安装MongoDB包
+# yum install mongodb-server mongodb
+2.编辑文件 /etc/mongod.conf 并完成如下动作：
+ bind_ip = 10.0.0.11
+ smallfiles = true
+3.启动MongoDB 并配置它随系统启动：
+# systemctl enable mongod.service
+# systemctl start mongod.service
+
+（5）消息队列
+OpenStack 使用 message queue 协调操作和各服务的状态信息。消息队列服务一般运行在控制节点上。OpenStack支持好几种消息队列服务包括 RabbitMQ, Qpid, 和 ZeroMQ。不过，大多数发行版本的OpenStack包支持特定的消息队列服务。本指南安装 RabbitMQ 消息队列服务，因为大部分发行版本都支持它。如果你想安装不同的消息队列服务，查询与之相关的文档
+1.安装安装包：
+# yum install rabbitmq-server
+2.启动消息队列服务并将其配置为随系统启动：
+# systemctl enable rabbitmq-server.service
+# systemctl start rabbitmq-server.service
+3.添加 openstack 用户：
+# rabbitmqctl add_user openstack RABBIT_PASS
+Creating user "openstack" ...
+...done.
+ （用合适的密码替换 RABBIT_DBPASS）
+4.给``openstack``用户配置写和读权限：
+# rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+Setting permissions for user "openstack" in vhost "/" ...
+...done.
+
+（6）Memcached
+认证服务认证缓存使用Memcached缓存令牌。缓存服务memecached运行在控制节点。在生产部署中，我们推荐联合启用防火墙、认证和加密保证它的安全。
+安全并配置组件
+1.安装
+# yum install memcached python-memcached
+2.启动Memcached服务，并且配置它随机启动。
+# systemctl enable memcached.service
+# systemctl start memcached.service
+
+四、认证服务keystone(Controller节点安装)
+（1）创建数据库及相关权限
+ CREATE DATABASE keystone;
+ GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' \
+  IDENTIFIED BY 'KEYSTONE_DBPASS';
+ GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' \
+  IDENTIFIED BY 'KEYSTONE_DBPASS';
+（2）生成一个随机值在初始的配置中作为管理员的令牌。
+ openssl rand -hex 10
+ ad73ce2975ce7686338b
+ （3）安装软件包
+  # yum install openstack-keystone httpd mod_wsgi
+ （4）修改配置文件，在/etc/keystone/keystone.conf中添加如下内容：
+  [DEFAULT]
+admin_token = ad73ce2975ce7686338b（随机生成值）
+[database]
+...
+connection = mysql+pymysql://keystone:KEYSTONE_DBPASS@controller/keystone（将``KEYSTONE_DBPASS``替换为你为数据库选择的密码。）
+[token]
+...
+provider = fernet
+ （5）初始化身份认证服务的数据库：
+  # su -s /bin/sh -c "keystone-manage db_sync" keystone
+ （6）初始化Fernet keys：
+ # keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+ （7）配置Httpd服务器：
+   ServerName controller
+ 用下面的内容创建文件 /etc/httpd/conf.d/wsgi-keystone.conf
+Listen 5000
+Listen 35357
+
+<VirtualHost *:5000>
+    WSGIDaemonProcess keystone-public processes=5 threads=1 user=keystone group=keystone display-name=%{GROUP}
+    WSGIProcessGroup keystone-public
+    WSGIScriptAlias / /usr/bin/keystone-wsgi-public
+    WSGIApplicationGroup %{GLOBAL}
+    WSGIPassAuthorization On
+    ErrorLogFormat "%{cu}t %M"
+    ErrorLog /var/log/httpd/keystone-error.log
+    CustomLog /var/log/httpd/keystone-access.log combined
+
+    <Directory /usr/bin>
+        Require all granted
+    </Directory>
+</VirtualHost>
+
+<VirtualHost *:35357>
+    WSGIDaemonProcess keystone-admin processes=5 threads=1 user=keystone group=keystone display-name=%{GROUP}
+    WSGIProcessGroup keystone-admin
+    WSGIScriptAlias / /usr/bin/keystone-wsgi-admin
+    WSGIApplicationGroup %{GLOBAL}
+    WSGIPassAuthorization On
+    ErrorLogFormat "%{cu}t %M"
+    ErrorLog /var/log/httpd/keystone-error.log
+    CustomLog /var/log/httpd/keystone-access.log combined
+
+    <Directory /usr/bin>
+        Require all granted
+    </Directory>
+</VirtualHost>
+
+（8)启动 Apache HTTP 服务并配置其随系统启动：
+# systemctl enable httpd.service
+# systemctl start httpd.service
+(9)创建服务实体和API端点
+ $ export OS_TOKEN=ad73ce2975ce7686338b
+   export OS_URL=http://controller:35357/v3
+   export OS_IDENTITY_API_VERSION=3
+在你的Openstack环境中，认证服务管理服务目录。服务使用这个目录来决定您的环境中可用的服务
+创建服务实体和身份认证服务：
+ openstack service create \
+  --name keystone --description "OpenStack Identity" identity
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | OpenStack Identity               |
+| enabled     | True                             |
+| id          | 4ddaae90388b4ebc9d252ec2252d8d10 |
+| name        | keystone                         |
+| type        | identity                         |
++-------------+----------------------------------+
+创建认证服务的 API 端点：
+$ openstack endpoint create --region RegionOne \
+  identity public http://controller:5000/v3
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 30fff543e7dc4b7d9a0fb13791b78bf4 |
+| interface    | public                           |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 8c8c0927262a45ad9066cfe70d46892c |
+| service_name | keystone                         |
+| service_type | identity                         |
+| url          | http://controller:5000/v3        |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  identity internal http://controller:5000/v3
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 57cfa543e7dc4b712c0ab137911bc4fe |
+| interface    | internal                         |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 6f8de927262ac12f6066cfe70d99ac51 |
+| service_name | keystone                         |
+| service_type | identity                         |
+| url          | http://controller:5000/v3        |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  identity admin http://controller:35357/v3
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 78c3dfa3e7dc44c98ab1b1379122ecb1 |
+| interface    | admin                            |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 34ab3d27262ac449cba6cfe704dbc11f |
+| service_name | keystone                         |
+| service_type | identity                         |
+| url          | http://controller:35357/v3       |
++--------------+----------------------------------+
+
+
+创建域、项目、用户和角色
+创建域：
+$ openstack domain create --description "Default Domain" default
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | Default Domain                   |
+| enabled     | True                             |
+| id          | e0353a670a9e496da891347c589539e9 |
+| name        | default                          |
++-------------+----------------------------------+
+创建admin项目：
+$ openstack project create --domain default \
+  --description "Admin Project" admin
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | Admin Project                    |
+| domain_id   | e0353a670a9e496da891347c589539e9 |
+| enabled     | True                             |
+| id          | 343d245e850143a096806dfaefa9afdc |
+| is_domain   | False                            |
+| name        | admin                            |
+| parent_id   | None                             |
++-------------+----------------------------------+
+创建admin用户
+$ openstack user create --domain default \
+  --password-prompt admin
+User Password:
+Repeat User Password:
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | e0353a670a9e496da891347c589539e9 |
+| enabled   | True                             |
+| id        | ac3377633149401296f6c0d92d79dc16 |
+| name      | admin                            |
++-----------+---------------------------
+创建admin角色
+$ openstack role create admin
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | None                             |
+| id        | cd2cb9a39e874ea69e5d4b896eb16128 |
+| name      | admin                            |
++-----------+----------------------------------+
+添加``admin`` 角色到 admin 项目和用户上：
+$ openstack role add --project admin --user admin admin
+**这个命令执行后没有输出
+另：
+创建``service``项目：
+$ openstack project create --domain default \
+  --description "Service Project" service
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | Service Project                  |
+| domain_id   | e0353a670a9e496da891347c589539e9 |
+| enabled     | True                             |
+| id          | 894cdfa366d34e9d835d3de01e752262 |
+| is_domain   | False                            |
+| name        | service                          |
+| parent_id   | None                             |
++-------------+----------------------------------+
+创建 demo 项目
+$ openstack project create --domain default \
+  --description "Demo Project" demo
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | Demo Project                     |
+| domain_id   | e0353a670a9e496da891347c589539e9 |
+| enabled     | True                             |
+| id          | ed0b60bf607743088218b0a533d5943f |
+| is_domain   | False                            |
+| name        | demo                             |
+| parent_id   | None                             |
++-------------+----------------------------------+
+创建demo用户
+$ openstack user create --domain default \
+  --password-prompt demo
+User Password:
+Repeat User Password:
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | e0353a670a9e496da891347c589539e9 |
+| enabled   | True                             |
+| id        | 58126687cbcc4888bfa9ab73a2256f27 |
+| name      | demo                             |
++-----------+----------------------------------+
+创建 user 角色：
+$ openstack role create user
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | None                             |
+| id        | 997ce8d05fc143ac97d83fdfb5998552 |
+| name      | user                             |
++-----------+----------------------------------+
+添加 user``角色到 ``demo 项目和用户：
+$ openstack role add --project demo --user demo user
+
+（4）验证操作
+因为安全性的原因，关闭临时认证令牌机制，编辑 /etc/keystone/keystone-paste.ini 文件，从``[pipeline:public_api]``，[pipeline:admin_api]``和``[pipeline:api_v3]``部分删除``admin_token_auth 。
+重置``OS_TOKEN``和``OS_URL`` 环境变量：
+$ unset OS_TOKEN OS_URL
+作为 admin 用户，请求认证令牌：
+$ openstack --os-auth-url http://controller:35357/v3 \
+  --os-project-domain-name default --os-user-domain-name default \
+  --os-project-name admin --os-username admin token issue
+Password:
++------------+-----------------------------------------------------------------+
+| Field      | Value                                                           |
++------------+-----------------------------------------------------------------+
+| expires    | 2016-02-12T20:14:07.056119Z                                     |
+| id         | gAAAAABWvi7_B8kKQD9wdXac8MoZiQldmjEO643d-e_j-XXq9AmIegIbA7UHGPv |
+|            | atnN21qtOMjCFWX7BReJEQnVOAj3nclRQgAYRsfSU_MrsuWb4EDtnjU7HEpoBb4 |
+|            | o6ozsA_NmFWEpLeKy0uNn_WeKbAhYygrsmQGA49dclHVnz-OMVLiyM9ws       |
+| project_id | 343d245e850143a096806dfaefa9afdc                                |
+| user_id    | ac3377633149401296f6c0d92d79dc16                                |
++------------+-----------------------------------------------------------------+
+
+作为``demo`` 用户，请求认证令牌：
+$ openstack --os-auth-url http://controller:5000/v3 \
+  --os-project-domain-name default --os-user-domain-name default \
+  --os-project-name demo --os-username demo token issue
+Password:
++------------+-----------------------------------------------------------------+
+| Field      | Value                                                           |
++------------+-----------------------------------------------------------------+
+| expires    | 2016-02-12T20:15:39.014479Z                                     |
+| id         | gAAAAABWvi9bsh7vkiby5BpCCnc-JkbGhm9wH3fabS_cY7uabOubesi-Me6IGWW |
+|            | yQqNegDDZ5jw7grI26vvgy1J5nCVwZ_zFRqPiz_qhbq29mgbQLglbkq6FQvzBRQ |
+|            | JcOzq3uwhzNxszJWmzGC7rJE_H0A_a3UFhqv8M4zMRYSbS2YF0MyFmp_U       |
+| project_id | ed0b60bf607743088218b0a533d5943f                                |
+| user_id    | 58126687cbcc4888bfa9ab73a2256f27                                |
++------------+-----------------------------------------------------------------+
+
+（5）创建 OpenStack 客户端环境脚本
+编辑文件 admin-openrc 并添加如下内容：
+
+export OS_PROJECT_DOMAIN_NAME=default
+export OS_USER_DOMAIN_NAME=default
+export OS_PROJECT_NAME=admin
+export OS_USERNAME=admin
+export OS_PASSWORD=ADMIN_PASS
+export OS_AUTH_URL=http://controller:35357/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+将 ADMIN_PASS 替换为你在认证服务中为 admin 用户选择的密码。
+
+编辑文件 demo-openrc 并添加如下内容：
+
+export OS_PROJECT_DOMAIN_NAME=default
+export OS_USER_DOMAIN_NAME=default
+export OS_PROJECT_NAME=demo
+export OS_USERNAME=demo
+export OS_PASSWORD=DEMO_PASS
+export OS_AUTH_URL=http://controller:5000/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+将 DEMO_PASS 替换为你在认证服务中为 demo 用户选择的密码。
+
+五、安装Glance服务（控制节点）
+（1）创建数据库及相关访问权限
+ CREATE DATABASE glance;
+ GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' \
+  IDENTIFIED BY 'GLANCE_DBPASS';
+GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' \
+  IDENTIFIED BY 'GLANCE_DBPASS';
+
+（2）服务凭证和API端点
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+要创建服务证书，完成这些步骤：
+
+创建 glance 用户：
+
+$ openstack user create --domain default --password-prompt glance
+User Password:
+Repeat User Password:
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | e0353a670a9e496da891347c589539e9 |
+| enabled   | True                             |
+| id        | e38230eeff474607805b596c91fa15d9 |
+| name      | glance                           |
++-----------+----------------------------------+
+添加 admin 角色到 glance 用户和 service 项目上。
+
+$ openstack role add --project service --user glance admin
+ 注解：这个命令执行后没有输出。
+
+创建``glance``服务实体：
+
+$ openstack service create --name glance \
+  --description "OpenStack Image" image
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | OpenStack Image                  |
+| enabled     | True                             |
+| id          | 8c2c7f1b9b5049ea9e63757b5533e6d2 |
+| name        | glance                           |
+| type        | image                            |
++-------------+----------------------------------+
+创建镜像服务的 API 端点：
+
+$ openstack endpoint create --region RegionOne \
+  image public http://controller:9292
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 340be3625e9b4239a6415d034e98aace |
+| interface    | public                           |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 8c2c7f1b9b5049ea9e63757b5533e6d2 |
+| service_name | glance                           |
+| service_type | image                            |
+| url          | http://controller:9292           |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  image internal http://controller:9292
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | a6e4b153c2ae4c919eccfdbb7dceb5d2 |
+| interface    | internal                         |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 8c2c7f1b9b5049ea9e63757b5533e6d2 |
+| service_name | glance                           |
+| service_type | image                            |
+| url          | http://controller:9292           |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  image admin http://controller:9292
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 0c37ed58103f4300a84ff125a539032d |
+| interface    | admin                            |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | 8c2c7f1b9b5049ea9e63757b5533e6d2 |
+| service_name | glance                           |
+| service_type | image                            |
+| url          | http://controller:9292           |
++--------------+----------------------------------+
+
+（3）安装软件包
+# yum install openstack-glance
+
+（4)修改配置文件编辑文件 /etc/glance/glance-api.conf 并完成如下动作：
+
+在 [database] 部分，配置数据库访问：
+
+[database]
+...
+connection = mysql+pymysql://glance:GLANCE_DBPASS@controller/glance
+将``GLANCE_DBPASS`` 替换为你为镜像服务选择的密码。
+
+在 [keystone_authtoken] 和 [paste_deploy] 部分，配置认证服务访问：
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = glance
+password = GLANCE_PASS
+
+[paste_deploy]
+...
+flavor = keystone
+将 GLANCE_PASS 替换为你为认证服务中你为 glance 用户选择的密码。
+
+ 注解
+
+在 [keystone_authtoken] 中注释或者删除其他选项。
+
+在 [glance_store] 部分，配置本地文件系统存储和镜像文件位置：
+
+[glance_store]
+...
+stores = file,http
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/
+编辑文件 ``/etc/glance/glance-registry.conf``并完成如下动作：
+
+在 [database] 部分，配置数据库访问：
+
+[database]
+...
+connection = mysql+pymysql://glance:GLANCE_DBPASS@controller/glance
+将``GLANCE_DBPASS`` 替换为你为镜像服务选择的密码。
+
+在 [keystone_authtoken] 和 [paste_deploy] 部分，配置认证服务访问：
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = glance
+password = GLANCE_PASS
+
+[paste_deploy]
+...
+flavor = keystone
+将 GLANCE_PASS 替换为你为认证服务中你为 glance 用户选择的密码。
+
+
+
+写入镜像服务数据库：
+# su -s /bin/sh -c "glance-manage db_sync" glance
+ 注解忽略输出中任何不推荐使用的信息。
+
+(6)完成安装启动镜像服务、配置他们随机启动：
+
+# systemctl enable openstack-glance-api.service \
+  openstack-glance-registry.service
+# systemctl start openstack-glance-api.service \
+  openstack-glance-registry.service
+(7)验证操作
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+下载源镜像：
+
+$ wget http://download.cirros-cloud.net/0.3.4/cirros-0.3.4-x86_64-disk.img
+使用 QCOW2 磁盘格式， bare 容器格式上传镜像到镜像服务并设置公共可见，这样所有的项目都可以访问它：
+
+$ openstack image create "cirros" \
+  --file cirros-0.3.4-x86_64-disk.img \
+  --disk-format qcow2 --container-format bare \
+  --public
++------------------+------------------------------------------------------+
+| Property         | Value                                                |
++------------------+------------------------------------------------------+
+| checksum         | 133eae9fb1c98f45894a4e60d8736619                     |
+| container_format | bare                                                 |
+| created_at       | 2015-03-26T16:52:10Z                                 |
+| disk_format      | qcow2                                                |
+| file             | /v2/images/cc5c6982-4910-471e-b864-1098015901b5/file |
+| id               | cc5c6982-4910-471e-b864-1098015901b5                 |
+| min_disk         | 0                                                    |
+| min_ram          | 0                                                    |
+| name             | cirros                                               |
+| owner            | ae7a98326b9c455588edd2656d723b9d                     |
+| protected        | False                                                |
+| schema           | /v2/schemas/image                                    |
+| size             | 13200896                                             |
+| status           | active                                               |
+| tags             |                                                      |
+| updated_at       | 2015-03-26T16:52:10Z                                 |
+| virtual_size     | None                                                 |
+| visibility       | public                                               |
++------------------+----------------------------
+确认镜像的上传并验证属性：
+
+$ openstack image list
++--------------------------------------+--------+--------+
+| ID                                   | Name   | Status |
++--------------------------------------+--------+--------+
+| 38047887-61a7-41ea-9b49-27987d5e8bb9 | cirros | active |
++--------------------------------------+--------+--------+
+
+六、安装Nova计算服务
+1）Controller节点：
+在安装和配置 Compute 服务前，你必须创建数据库服务的凭据以及 API endpoints。
+
+为了创建数据库，必须完成这些步骤：
+
+用数据库连接客户端以 root 用户连接到数据库服务器：
+
+$ mysql -u root -p
+创建 nova_api 和 nova 数据库：
+
+CREATE DATABASE nova_api;
+CREATE DATABASE nova;
+对数据库进行正确的授权：
+
+GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' \
+  IDENTIFIED BY 'NOVA_DBPASS';
+GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' \
+  IDENTIFIED BY 'NOVA_DBPASS';
+GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' \
+  IDENTIFIED BY 'NOVA_DBPASS';
+GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' \
+  IDENTIFIED BY 'NOVA_DBPASS';
+用合适的密码代替 NOVA_DBPASS。
+
+退出数据库客户端。
+
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+要创建服务证书，完成这些步骤：
+
+创建 nova 用户：
+
+$ openstack user create --domain default \
+  --password-prompt nova
+User Password:
+Repeat User Password:
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | e0353a670a9e496da891347c589539e9 |
+| enabled   | True                             |
+| id        | 8c46e4760902464b889293a74a0c90a8 |
+| name      | nova                             |
++-----------+----------------------------------+
+给 nova 用户添加 admin 角色：
+
+$ openstack role add --project service --user nova admin
+ 注解这个命令执行后没有输出。
+
+创建 nova 服务实体：
+
+$ openstack service create --name nova \
+  --description "OpenStack Compute" compute
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | OpenStack Compute                |
+| enabled     | True                             |
+| id          | 060d59eac51b4594815603d75a00aba2 |
+| name        | nova                             |
+| type        | compute                          |
++-------------+----------------------------------+
+创建 Compute 服务 API 端点 ：
+
+$ openstack endpoint create --region RegionOne \
+  compute public http://controller:8774/v2.1/%\(tenant_id\)s
++--------------+-------------------------------------------+
+| Field        | Value                                     |
++--------------+-------------------------------------------+
+| enabled      | True                                      |
+| id           | 3c1caa473bfe4390a11e7177894bcc7b          |
+| interface    | public                                    |
+| region       | RegionOne                                 |
+| region_id    | RegionOne                                 |
+| service_id   | e702f6f497ed42e6a8ae3ba2e5871c78          |
+| service_name | nova                                      |
+| service_type | compute                                   |
+| url          | http://controller:8774/v2.1/%(tenant_id)s |
++--------------+-------------------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  compute internal http://controller:8774/v2.1/%\(tenant_id\)s
++--------------+-------------------------------------------+
+| Field        | Value                                     |
++--------------+-------------------------------------------+
+| enabled      | True                                      |
+| id           | e3c918de680746a586eac1f2d9bc10ab          |
+| interface    | internal                                  |
+| region       | RegionOne                                 |
+| region_id    | RegionOne                                 |
+| service_id   | e702f6f497ed42e6a8ae3ba2e5871c78          |
+| service_name | nova                                      |
+| service_type | compute                                   |
+| url          | http://controller:8774/v2.1/%(tenant_id)s |
++--------------+-------------------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  compute admin http://controller:8774/v2.1/%\(tenant_id\)s
++--------------+-------------------------------------------+
+| Field        | Value                                     |
++--------------+-------------------------------------------+
+| enabled      | True                                      |
+| id           | 38f7af91666a47cfb97b4dc790b94424          |
+| interface    | admin                                     |
+| region       | RegionOne                                 |
+| region_id    | RegionOne                                 |
+| service_id   | e702f6f497ed42e6a8ae3ba2e5871c78          |
+| service_name | nova                                      |
+| service_type | compute                                   |
+| url          | http://controller:8774/v2.1/%(tenant_id)s |
++--------------+-------------------------------------------+
+
+
+ 注解：
+
+默认配置文件在各发行版本中可能不同。你可能需要添加这些部分，选项而不是修改已经存在的部分和选项。另外，在配置片段中的省略号(...)表示默认的配置选项你应该保留。
+
+安装软件包：
+
+# yum install openstack-nova-api openstack-nova-conductor \
+  openstack-nova-console openstack-nova-novncproxy \
+  openstack-nova-scheduler
+编辑``/etc/nova/nova.conf``文件并完成下面的操作：
+
+在``[DEFAULT]``部分，只启用计算和元数据API：
+
+[DEFAULT]
+...
+enabled_apis = osapi_compute,metadata
+在``[api_database]``和``[database]``部分，配置数据库的连接：
+
+[api_database]
+...
+connection = mysql+pymysql://nova:NOVA_DBPASS@controller/nova_api
+
+[database]
+...
+connection = mysql+pymysql://nova:NOVA_DBPASS@controller/nova
+用你为 Compute 数据库选择的密码来代替 NOVA_DBPASS。
+
+在 “[DEFAULT]” 和 “[oslo_messaging_rabbit]”部分，配置 “RabbitMQ” 消息队列访问：
+
+[DEFAULT]
+...
+rpc_backend = rabbit
+
+[oslo_messaging_rabbit]
+...
+rabbit_host = controller
+rabbit_userid = openstack
+rabbit_password = RABBIT_PASS
+用你在 “RabbitMQ” 中为 “openstack” 选择的密码替换 “RABBIT_PASS”。
+
+在 “[DEFAULT]” 和 “[keystone_authtoken]” 部分，配置认证服务访问：
+
+[DEFAULT]
+...
+auth_strategy = keystone
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = NOVA_PASS
+使用你在身份认证服务中设置的``nova`` 用户的密码替换``NOVA_PASS``。
+
+ 注解
+
+在 [keystone_authtoken] 中注释或者删除其他选项。
+
+在 [DEFAULT 部分，配置``my_ip`` 来使用控制节点的管理接口的IP 地址。
+
+[DEFAULT]
+...
+my_ip = 192.168.11.228
+在 [DEFAULT] 部分，使能 Networking 服务：
+
+[DEFAULT]
+...
+use_neutron = True
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+ 注解
+
+默认情况下，计算服务使用内置的防火墙服务。由于网络服务包含了防火墙服务，你必须使用``nova.virt.firewall.NoopFirewallDriver``防火墙服务来禁用掉计算服务内置的防火墙服务
+
+在``[vnc]``部分，配置VNC代理使用控制节点的管理接口IP地址 ：
+
+[vnc]
+...
+vncserver_listen = $my_ip
+vncserver_proxyclient_address = $my_ip
+在 [glance] 区域，配置镜像服务 API 的位置：
+
+[glance]
+...
+api_servers = http://controller:9292
+在 [oslo_concurrency] 部分，配置锁路径：
+
+[oslo_concurrency]
+...
+lock_path = /var/lib/nova/tmp
+同步Compute 数据库：
+
+# su -s /bin/sh -c "nova-manage api_db sync" nova
+# su -s /bin/sh -c "nova-manage db sync" nova
+
+
+启动 Compute 服务并将其设置为随系统启动：
+
+# systemctl enable openstack-nova-api.service \
+  openstack-nova-consoleauth.service openstack-nova-scheduler.service \
+  openstack-nova-conductor.service openstack-nova-novncproxy.service
+# systemctl start openstack-nova-api.service \
+  openstack-nova-consoleauth.service openstack-nova-scheduler.service \
+  openstack-nova-conductor.service openstack-nova-novncproxy.service
+
+2）Computer节点
+安装软件包：
+
+# yum install openstack-nova-compute
+编辑``/etc/nova/nova.conf``文件并完成下面的操作：
+
+在``[DEFAULT]`` 和 [oslo_messaging_rabbit]部分，配置``RabbitMQ``消息队列的连接：
+
+[DEFAULT]
+...
+rpc_backend = rabbit
+
+[oslo_messaging_rabbit]
+...
+rabbit_host = controller
+rabbit_userid = openstack
+rabbit_password = RABBIT_PASS
+用你在 “RabbitMQ” 中为 “openstack” 选择的密码替换 “RABBIT_PASS”。
+
+在 “[DEFAULT]” 和 “[keystone_authtoken]” 部分，配置认证服务访问：
+
+[DEFAULT]
+...
+auth_strategy = keystone
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = NOVA_PASS
+使用你在身份认证服务中设置的``nova`` 用户的密码替换``NOVA_PASS``。
+
+ 注解
+
+在 [keystone_authtoken] 中注释或者删除其他选项。
+
+在 [DEFAULT] 部分，配置 my_ip 选项：
+
+[DEFAULT]
+...
+my_ip = MANAGEMENT_INTERFACE_IP_ADDRESS
+将其中的 MANAGEMENT_INTERFACE_IP_ADDRESS 替换为计算节点上的管理网络接口的IP 地址，例如 :ref:`example architecture <overview-example-architectures>`中所示的第一个节点 10.0.0.31 。
+
+在 [DEFAULT] 部分，使能 Networking 服务：
+
+[DEFAULT]
+...
+use_neutron = True
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+ 注解
+
+缺省情况下，Compute 使用内置的防火墙服务。由于 Networking 包含了防火墙服务，所以你必须通过使用 nova.virt.firewall.NoopFirewallDriver 来去除 Compute 内置的防火墙服务。
+
+在``[vnc]``部分，启用并配置远程控制台访问：
+
+[vnc]
+...
+enabled = True
+vncserver_listen = 0.0.0.0
+vncserver_proxyclient_address = $my_ip
+novncproxy_base_url = http://controller:6080/vnc_auto.html
+服务器组件监听所有的 IP 地址，而代理组件仅仅监听计算节点管理网络接口的 IP 地址。基本的 URL 指示您可以使用 web 浏览器访问位于该计算节点上实例的远程控制台的位置。
+
+ 注解
+
+如果你运行浏览器的主机无法解析``controller`` 主机名，你可以将 ``controller``替换为你控制节点管理网络的IP地址。
+
+在 [glance] 区域，配置镜像服务 API 的位置：
+
+[glance]
+...
+api_servers = http://controller:9292
+在 [oslo_concurrency] 部分，配置锁路径：
+
+[oslo_concurrency]
+...
+lock_path = /var/lib/nova/tmp
+完成安装?
+
+确定您的计算节点是否支持虚拟机的硬件加速。
+
+$ egrep -c '(vmx|svm)' /proc/cpuinfo
+如果这个命令返回了 one or greater 的值，那么你的计算节点支持硬件加速且不需要额外的配置。
+
+如果这个命令返回了 zero 值，那么你的计算节点不支持硬件加速。你必须配置 libvirt 来使用 QEMU 去代替 KVM
+
+在 /etc/nova/nova.conf 文件的 [libvirt] 区域做出如下的编辑：
+
+[libvirt]
+...
+virt_type = qemu
+启动计算服务及其依赖，并将其配置为随系统自动启动：
+
+# systemctl enable libvirtd.service openstack-nova-compute.service
+# systemctl start libvirtd.service openstack-nova-compute.service
+
+3）验证操作
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+列出服务组件，以验证是否成功启动并注册了每个进程：
+
+$ openstack compute service list
++----+--------------------+------------+----------+---------+-------+----------------------------+
+| Id | Binary             | Host       | Zone     | Status  | State | Updated At                 |
++----+--------------------+------------+----------+---------+-------+----------------------------+
+|  1 | nova-consoleauth   | controller | internal | enabled | up    | 2016-02-09T23:11:15.000000 |
+|  2 | nova-scheduler     | controller | internal | enabled | up    | 2016-02-09T23:11:15.000000 |
+|  3 | nova-conductor     | controller | internal | enabled | up    | 2016-02-09T23:11:16.000000 |
+|  4 | nova-compute       | compute1   | nova     | enabled | up    | 2016-02-09T23:11:20.000000 |
++----+--------------------+------------+----------+---------+-------+----------------------------+
+
+该输出应该显示三个服务组件在控制节点上启用，一个服务组件在计算节点上启用。
+
+
+
+七、安装Networking 服务（本环境安装在控制节点，网络使用FLAT三层网络模式）
+完成下面的步骤以创建数据库：
+
+用数据库连接客户端以 root 用户连接到数据库服务器：
+
+$ mysql -u root -p
+创建``neutron`` 数据库：
+
+CREATE DATABASE neutron;
+对``neutron`` 数据库授予合适的访问权限，使用合适的密码替换``NEUTRON_DBPASS``：
+
+GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' \
+  IDENTIFIED BY 'NEUTRON_DBPASS';
+GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' \
+  IDENTIFIED BY 'NEUTRON_DBPASS';
+退出数据库客户端。
+
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+要创建服务证书，完成这些步骤：
+
+创建``neutron``用户：
+
+$ openstack user create --domain default --password-prompt neutron
+User Password:
+Repeat User Password:
++-----------+----------------------------------+
+| Field     | Value                            |
++-----------+----------------------------------+
+| domain_id | e0353a670a9e496da891347c589539e9 |
+| enabled   | True                             |
+| id        | b20a6692f77b4258926881bf831eb683 |
+| name      | neutron                          |
++-----------+----------------------------------+
+添加``admin`` 角色到``neutron`` 用户：
+
+$ openstack role add --project service --user neutron admin
+ 注解
+
+这个命令执行后没有输出。
+
+创建``neutron``服务实体：
+
+$ openstack service create --name neutron \
+  --description "OpenStack Networking" network
++-------------+----------------------------------+
+| Field       | Value                            |
++-------------+----------------------------------+
+| description | OpenStack Networking             |
+| enabled     | True                             |
+| id          | f71529314dab4a4d8eca427e701d209e |
+| name        | neutron                          |
+| type        | network                          |
++-------------+----------------------------------+
+创建网络服务API端点：
+
+$ openstack endpoint create --region RegionOne \
+  network public http://controller:9696
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 85d80a6d02fc4b7683f611d7fc1493a3 |
+| interface    | public                           |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | f71529314dab4a4d8eca427e701d209e |
+| service_name | neutron                          |
+| service_type | network                          |
+| url          | http://controller:9696           |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  network internal http://controller:9696
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 09753b537ac74422a68d2d791cf3714f |
+| interface    | internal                         |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | f71529314dab4a4d8eca427e701d209e |
+| service_name | neutron                          |
+| service_type | network                          |
+| url          | http://controller:9696           |
++--------------+----------------------------------+
+
+$ openstack endpoint create --region RegionOne \
+  network admin http://controller:9696
++--------------+----------------------------------+
+| Field        | Value                            |
++--------------+----------------------------------+
+| enabled      | True                             |
+| id           | 1ee14289c9374dffb5db92a5c112fc4e |
+| interface    | admin                            |
+| region       | RegionOne                        |
+| region_id    | RegionOne                        |
+| service_id   | f71529314dab4a4d8eca427e701d209e |
+| service_name | neutron                          |
+| service_type | network                          |
+| url          | http://controller:9696           |
++--------------+----------------------------------+
+
+
+ 配置私有网络部分
+ 在controller节点上安装并配置网络组件
+
+安装组件?
+
+# yum install openstack-neutron openstack-neutron-ml2 \
+  openstack-neutron-linuxbridge ebtables
+配置服务组件?
+
+编辑``/etc/neutron/neutron.conf`` 文件并完成如下操作：
+
+在 [database] 部分，配置数据库访问：
+
+[database]
+...
+connection = mysql+pymysql://neutron:NEUTRON_DBPASS@controller/neutron
+使用你设置的数据库密码替换 NEUTRON_DBPASS 。
+
+在``[DEFAULT]``部分，启用Modular Layer 2 (ML2)插件，路由服务和重叠的IP地址：
+
+[DEFAULT]
+...
+core_plugin = ml2
+service_plugins = router
+allow_overlapping_ips = True
+在 “[DEFAULT]” 和 “[oslo_messaging_rabbit]”部分，配置 “RabbitMQ” 消息队列的连接：
+
+[DEFAULT]
+...
+rpc_backend = rabbit
+
+[oslo_messaging_rabbit]
+...
+rabbit_host = controller
+rabbit_userid = openstack
+rabbit_password = RABBIT_PASS
+用你在RabbitMQ中为``openstack``选择的密码替换 “RABBIT_PASS”。
+
+在 “[DEFAULT]” 和 “[keystone_authtoken]” 部分，配置认证服务访问：
+
+[DEFAULT]
+...
+auth_strategy = keystone
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = neutron
+password = NEUTRON_PASS
+将 NEUTRON_PASS 替换为你在认证服务中为 neutron 用户选择的密码。
+
+ 注解
+
+在 [keystone_authtoken] 中注释或者删除其他选项。
+
+在``[DEFAULT]``和``[nova]``部分，配置网络服务来通知计算节点的网络拓扑变化：
+
+[DEFAULT]
+...
+notify_nova_on_port_status_changes = True
+notify_nova_on_port_data_changes = True
+
+[nova]
+...
+auth_url = http://controller:35357
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = nova
+password = NOVA_PASS
+使用你在身份认证服务中设置的``nova`` 用户的密码替换``NOVA_PASS``。
+
+在 [oslo_concurrency] 部分，配置锁路径：
+
+[oslo_concurrency]
+...
+lock_path = /var/lib/neutron/tmp
+配置 Modular Layer 2 (ML2) 插件?
+
+ML2插件使用Linuxbridge机制来为实例创建layer－2虚拟网络基础设施
+
+编辑``/etc/neutron/plugins/ml2/ml2_conf.ini``文件并完成以下操作：
+
+在``[ml2]``部分，启用flat，VLAN以及VXLAN网络：
+
+[ml2]
+...
+type_drivers = flat,vlan,vxlan
+在``[ml2]``部分，启用VXLAN私有网络：
+
+[ml2]
+...
+tenant_network_types = vxlan
+在``[ml2]``部分，启用Linuxbridge和layer－2机制：
+
+[ml2]
+...
+mechanism_drivers = linuxbridge,l2population
+ 警告
+
+在你配置完ML2插件之后，删除可能导致数据库不一致的``type_drivers``项的值。
+
+ 注解
+
+Linuxbridge代理只支持VXLAN覆盖网络。
+
+在``[ml2]`` 部分，启用端口安全扩展驱动：
+
+[ml2]
+...
+extension_drivers = port_security
+在``[ml2_type_flat]``部分，配置公共虚拟网络为flat网络
+
+[ml2_type_flat]
+...
+flat_networks = provider
+在``[ml2_type_vxlan]``部分，为私有网络配置VXLAN网络识别的网络范围：
+
+[ml2_type_vxlan]
+...
+vni_ranges = 1:1000
+在 ``[securitygroup]``部分，启用 ipset 增加安全组规则的高效性：
+
+[securitygroup]
+...
+enable_ipset = True
+配置Linuxbridge代理,Linuxbridge代理为实例建立layer－2虚拟网络并且处理安全组规则。
+
+编辑``/etc/neutron/plugins/ml2/linuxbridge_agent.ini``文件并且完成以下操作：
+
+在``[linux_bridge]``部分，将公共虚拟网络和公共物理网络接口对应起来：
+
+[linux_bridge]
+physical_interface_mappings = provider:PROVIDER_INTERFACE_NAME
+将``PUBLIC_INTERFACE_NAME`` 替换为底层的物理公共网络接口。请查看：ref:environment-networking for more information。
+
+在``[vxlan]``部分，启用VXLAN覆盖网络，配置覆盖网络的物理网络接口的IP地址，启用layer－2 population：
+
+[vxlan]
+enable_vxlan = True
+local_ip = OVERLAY_INTERFACE_IP_ADDRESS
+l2_population = True
+将``OVERLAY_INTERFACE_IP_ADDRESS`` 替换为处理覆盖网络的底层物理网络接口的IP地址。这个示例架构中使用管理网络接口与其他节点建立流量隧道。因此，将``OVERLAY_INTERFACE_IP_ADDRESS``替换为计算节点的管理网络的IP地址。请查看：ref:environment-networking for more information。
+
+在 ``[securitygroup]``部分，启用安全组并配置 Linuxbridge iptables firewall driver:
+
+[securitygroup]
+...
+enable_security_group = True
+firewall_driver = neutron.agent.linux.iptables_firewall.IptablesFirewallDriver
+配置layer－3代理?
+
+Layer-3代理为私有虚拟网络提供路由和NAT服务
+
+编辑``/etc/neutron/l3_agent.ini``文件并完成以下操作：
+
+在``[DEFAULT]``部分，配置Linuxbridge接口驱动和外部网络网桥：
+
+[DEFAULT]
+...
+interface_driver = neutron.agent.linux.interface.BridgeInterfaceDriver
+external_network_bridge =
+ 注解
+
+``external_network_bridge``选项特意设置成缺省值，这样就可以在一个代理上允许多种外部网络
+
+配置DHCP代理
+The DHCP agent provides DHCP services for virtual networks.
+
+编辑``/etc/neutron/dhcp_agent.ini``文件并完成下面的操作：
+
+在``[DEFAULT]``部分，配置Linuxbridge驱动接口，DHCP驱动并启用隔离元数据，这样在公共网络上的实例就可以通过网络来访问元数据
+
+[DEFAULT]
+...
+interface_driver = neutron.agent.linux.interface.BridgeInterfaceDriver
+dhcp_driver = neutron.agent.linux.dhcp.Dnsmasq
+enable_isolated_metadata = True
+
+配置元数据代理
+
+The :term:`metadata agent <Metadata agent>`负责提供配置信息，例如：访问实例的凭证
+
+编辑``/etc/neutron/metadata_agent.ini``文件并完成以下操作：
+
+在``[DEFAULT]`` 部分，配置元数据主机以及共享密码：
+
+[DEFAULT]
+...
+nova_metadata_ip = controller
+metadata_proxy_shared_secret = METADATA_SECRET
+用你为元数据代理设置的密码替换 METADATA_SECRET。
+
+为计算节点配置网络服务编辑``/etc/nova/nova.conf``文件并完成以下操作：
+
+在``[neutron]``部分，配置访问参数，启用元数据代理并设置密码：
+
+[neutron]
+...
+url = http://controller:9696
+auth_url = http://controller:35357
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = neutron
+password = NEUTRON_PASS
+
+service_metadata_proxy = True
+metadata_proxy_shared_secret = METADATA_SECRET
+将 NEUTRON_PASS 替换为你在认证服务中为 neutron 用户选择的密码。
+
+使用你为元数据代理设置的密码替换``METADATA_SECRET``
+
+完成安装?
+
+网络服务初始化脚本需要一个超链接 /etc/neutron/plugin.ini``指向ML2插件配置文件/etc/neutron/plugins/ml2/ml2_conf.ini``。如果超链接不存在，使用下面的命令创建它：
+
+# ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+同步数据库：
+
+# su -s /bin/sh -c "neutron-db-manage --config-file /etc/neutron/neutron.conf \
+  --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head" neutron
+ 注解
+
+数据库的同步发生在 Networking 之后，因为脚本需要完成服务器和插件的配置文件。
+
+重启计算API 服务：
+
+# systemctl restart openstack-nova-api.service
+当系统启动时，启动 Networking 服务并配置它启动。
+
+
+# systemctl enable neutron-server.service \
+  neutron-linuxbridge-agent.service neutron-dhcp-agent.service \
+  neutron-metadata-agent.service
+# systemctl start neutron-server.service \
+  neutron-linuxbridge-agent.service neutron-dhcp-agent.service \
+  neutron-metadata-agent.service
+
+
+# systemctl enable neutron-l3-agent.service
+# systemctl start neutron-l3-agent.service
+
+
+安装和配置计算节点
+安装组件
+# yum install openstack-neutron-linuxbridge ebtables ipset
+
+编辑``/etc/neutron/neutron.conf`` 文件并完成如下操作：
+
+在``[database]`` 部分，注释所有``connection`` 项，因为计算节点不直接访问数据库。
+
+在 “[DEFAULT]” 和 “[oslo_messaging_rabbit]”部分，配置 “RabbitMQ” 消息队列的连接：
+
+[DEFAULT]
+...
+rpc_backend = rabbit
+
+[oslo_messaging_rabbit]
+...
+rabbit_host = controller
+rabbit_userid = openstack
+rabbit_password = RABBIT_PASS
+用你在RabbitMQ中为``openstack``选择的密码替换 “RABBIT_PASS”。
+
+在 “[DEFAULT]” 和 “[keystone_authtoken]” 部分，配置认证服务访问：
+
+[DEFAULT]
+...
+auth_strategy = keystone
+
+[keystone_authtoken]
+...
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = neutron
+password = NEUTRON_PASS
+将 NEUTRON_PASS 替换为你在认证服务中为 neutron 用户选择的密码。
+
+ 注解
+
+在 [keystone_authtoken] 中注释或者删除其他选项。
+
+在 [oslo_concurrency] 部分，配置锁路径：
+
+[oslo_concurrency]
+...
+lock_path = /var/lib/neutron/tmp
+配置网络选项?
+
+选择与您之前在控制节点上选择的相同的网络选项。之后，回到这里并进行下一步：为计算节点配置网络服务。
+
+网络选项1：公共网络
+网络选项2：私有网络
+为计算节点配置网络服务?
+
+编辑``/etc/nova/nova.conf``文件并完成下面的操作：
+
+在``[neutron]`` 部分，配置访问参数：
+
+[neutron]
+...
+url = http://controller:9696
+auth_url = http://controller:35357
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+region_name = RegionOne
+project_name = service
+username = neutron
+password = NEUTRON_PASS
+将 NEUTRON_PASS 替换为你在认证服务中为 neutron 用户选择的密码。
+
+完成安装?
+
+重启计算服务：
+
+# systemctl restart openstack-nova-compute.service
+启动Linuxbridge代理并配置它开机自启动：
+
+# systemctl enable neutron-linuxbridge-agent.service
+# systemctl start neutron-linuxbridge-agent.service
+
+
+验证操作
+获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . admin-openrc
+列出加载的扩展来验证``neutron-server``进程是否正常启动：
+
+$ neutron ext-list
++---------------------------+-----------------------------------------------+
+| alias                     | name                                          |
++---------------------------+-----------------------------------------------+
+| default-subnetpools       | Default Subnetpools                           |
+| network-ip-availability   | Network IP Availability                       |
+| network_availability_zone | Network Availability Zone                     |
+| auto-allocated-topology   | Auto Allocated Topology Services              |
+| ext-gw-mode               | Neutron L3 Configurable external gateway mode |
+| binding                   | Port Binding                                  |
+| agent                     | agent                                         |
+| subnet_allocation         | Subnet Allocation                             |
+| l3_agent_scheduler        | L3 Agent Scheduler                            |
+| tag                       | Tag support                                   |
+| external-net              | Neutron external network                      |
+| net-mtu                   | Network MTU                                   |
+| availability_zone         | Availability Zone                             |
+| quotas                    | Quota management support                      |
+| l3-ha                     | HA Router extension                           |
+| flavors                   | Neutron Service Flavors                       |
+| provider                  | Provider Network                              |
+| multi-provider            | Multi Provider Network                        |
+| address-scope             | Address scope                                 |
+| extraroute                | Neutron Extra Route                           |
+| timestamp_core            | Time Stamp Fields addition for core resources |
+| router                    | Neutron L3 Router                             |
+| extra_dhcp_opt            | Neutron Extra DHCP opts                       |
+| dns-integration           | DNS Integration                               |
+| security-group            | security-group                                |
+| dhcp_agent_scheduler      | DHCP Agent Scheduler                          |
+| router_availability_zone  | Router Availability Zone                      |
+| rbac-policies             | RBAC Policies                                 |
+| standard-attr-description | standard-attr-description                     |
+| port-security             | Port Security                                 |
+| allowed-address-pairs     | Allowed Address Pairs                         |
+| dvr                       | Distributed Virtual Router  
+-----------------------------------------------------------------------------
+$ neutron agent-list
++--------------------------------------+--------------------+------------+-------+----------------+---------------------------+
+| id                                   | agent_type         | host       | alive | admin_state_up | binary                    |
++--------------------------------------+--------------------+------------+-------+----------------+---------------------------+
+| 08905043-5010-4b87-bba5-aedb1956e27a | Linux bridge agent | compute1   | :-)   | True           | neutron-linuxbridge-agent |
+| 27eee952-a748-467b-bf71-941e89846a92 | Linux bridge agent | controller | :-)   | True           | neutron-linuxbridge-agent |
+| 830344ff-dc36-4956-84f4-067af667a0dc | L3 agent           | controller | :-)   | True           | neutron-l3-agent          |
+| dd3644c9-1a3a-435a-9282-eb306b4b0391 | DHCP agent         | controller | :-)   | True           | neutron-dhcp-agent        |
+| f49a4b81-afd6-4b3d-b923-66c8f0517099 | Metadata agent     | controller | :-)   | True           | neutron-metadata-agent    |
++--------------------------------------+--------------------+------------+-------+----------------+---------------------------+
+输出结果应该包括控制节点上的四个代理和每个计算节点上的一个代理。
+
+ 八、安装dashboard
+ 
+ 安装软件包：
+# yum install openstack-dashboard
+编辑文件 /etc/openstack-dashboard/local_settings 并完成如下动作：
+
+在 controller 节点上配置仪表盘以使用 OpenStack 服务：
+
+OPENSTACK_HOST = "controller"
+允许所有主机访问仪表板：
+
+ALLOWED_HOSTS = ['*', ]
+配置 memcached 会话存储服务：
+
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+
+CACHES = {
+    'default': {
+         'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
+         'LOCATION': 'controller:11211',
+    }
+}
+ 注解
+
+将其他的会话存储服务配置注释。
+
+启用第3版认证API:
+
+OPENSTACK_KEYSTONE_URL = "http://%s:5000/v3" % OPENSTACK_HOST
+启用对域的支持
+
+OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True
+配置API版本:
+
+OPENSTACK_API_VERSIONS = {
+    "identity": 3,
+    "image": 2,
+    "volume": 2,
+}
+通过仪表盘创建用户时的默认域配置为 default :
+
+OPENSTACK_KEYSTONE_DEFAULT_DOMAIN = "default"
+通过仪表盘创建的用户默认角色配置为 user ：
+
+OPENSTACK_KEYSTONE_DEFAULT_ROLE = "user"
+如果您选择网络参数1，禁用支持3层网络服务：
+
+OPENSTACK_NEUTRON_NETWORK = {
+    ...
+    'enable_router': False,
+    'enable_quotas': False,
+    'enable_distributed_router': False,
+    'enable_ha_router': False,
+    'enable_lb': False,
+    'enable_firewall': False,
+    'enable_vpn': False,
+    'enable_fip_topology_check': False,
+}
+可以选择性地配置时区：
+
+TIME_ZONE = "TIME_ZONE"
+使用恰当的时区标识替换``TIME_ZONE`` 。更多信息，参考 list of time zones。
+
+完成安装?
+
+重启web服务器以及会话存储服务：
+
+# systemctl restart httpd.service memcached.service
+
+
+
+九、创建三层网络
+（1）创建公共网络
+在控制节点上，加载 admin 凭证来获取管理员能执行的命令访问权限：
+
+$ . admin-openrc
+创建网络：
+
+$ neutron net-create --shared --provider:physical_network provider \
+  --provider:network_type flat provider
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | 0e62efcd-8cee-46c7-b163-d8df05c3c5ad |
+| mtu                       | 1500                                 |
+| name                      | provider                             |
+| port_security_enabled     | True                                 |
+| provider:network_type     | flat                                 |
+| provider:physical_network | provider                             |
+| provider:segmentation_id  |                                      |
+| router:external           | False                                |
+| shared                    | True                                 |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | d84313397390425c8ed50b2f6e18d092     |
++---------------------------+--------------------------------------+
+
+创建浮动ip地址池：
+neutron subnet-create --name provider \
+  --allocation-pool start=192.168.100.141,end=192.168.100.177 \
+  --dns-nameserver 202.99.192.66 --gateway 192.168.100.1 \
+  provider 192.168.100.0/24
+  
+（2）创建虚拟机私有网络
+
+在控制节点上，获得 admin 凭证来获取只有管理员能执行的命令的访问权限：
+
+$ . demo-openrc
+创建网络：
+
+$ neutron net-create selfservice
+Created a new network:
++-----------------------+--------------------------------------+
+| Field                 | Value                                |
++-----------------------+--------------------------------------+
+| admin_state_up        | True                                 |
+| id                    | 7c6f9b37-76b4-463e-98d8-27e5686ed083 |
+| mtu                   | 0                                    |
+| name                  | selfservice                          |
+| port_security_enabled | True                                 |
+| router:external       | False                                |
+| shared                | False                                |
+| status                | ACTIVE                               |
+| subnets               |                                      |
+| tenant_id             | f5b2ccaa75ac413591f12fcaa096aa5c     |
++-----------------------+--------------------------------------+
+
+neutron subnet-create --name selfservice \
+  --dns-nameserver 8.8.4.4 --gateway 172.16.1.1 \
+  selfservice 172.16.1.0/24
+Created a new subnet:
++-------------------+------------------------------------------------+
+| Field             | Value                                          |
++-------------------+------------------------------------------------+
+| allocation_pools  | {"start": "172.16.1.2", "end": "172.16.1.254"} |
+| cidr              | 172.16.1.0/24                                  |
+| dns_nameservers   | 8.8.4.4                                        |
+| enable_dhcp       | True                                           |
+| gateway_ip        | 172.16.1.1                                     |
+| host_routes       |                                                |
+| id                | 3482f524-8bff-4871-80d4-5774c2730728           |
+| ip_version        | 4                                              |
+| ipv6_address_mode |                                                |
+| ipv6_ra_mode      |                                                |
+| name              | selfservice                                    |
+| network_id        | 7c6f9b37-76b4-463e-98d8-27e5686ed083           |
+| subnetpool_id     |                                                |
+| tenant_id         | f5b2ccaa75ac413591f12fcaa096aa5c               |
++-------------------+------------------------------------------------+
+
+（3）创建路由
+在控制节点上，加载 admin 凭证来获取管理员能执行的命令访问权限：
+
+$ . admin-openrc
+添加’ router:external ‘ 到’ provider’ 网络
+
+$ neutron net-update provider --router:external
+Updated network: provider
+加载 demo 证书获得用户能执行的命令访问权限：
+
+$ . demo-openrc
+创建路由：
+
+$ neutron router-create router
+Created a new router:
++-----------------------+--------------------------------------+
+| Field                 | Value                                |
++-----------------------+--------------------------------------+
+| admin_state_up        | True                                 |
+| external_gateway_info |                                      |
+| id                    | 89dd2083-a160-4d75-ab3a-14239f01ea0b |
+| name                  | router                               |
+| routes                |                                      |
+| status                | ACTIVE                               |
+| tenant_id             | f5b2ccaa75ac413591f12fcaa096aa5c     |
++-----------------------+--------------------------------------+
+给路由器添加一个私网子网的接口：
+
+$ neutron router-interface-add router selfservice
+Added interface bff6605d-824c-41f9-b744-21d128fc86e1 to router router.
+给路由器设置公有网络的网关：
+
+$ neutron router-gateway-set router provider
+Set gateway for router router
+
+（4）验证操作
+验证操作?
+
+我们推荐您在操作之前，确认并修复问题。以下步骤将使用网络和子网创建示例中的IP地址。
+
+在控制节点上，加载 admin 凭证来获取管理员能执行的命令访问权限：
+
+$ . admin-openrc
+列出网络命名空间。你应该可以看到一个’ qrouter ‘命名空间和两个’qdhcp ‘ 命名空间
+
+$ ip netns
+qrouter-89dd2083-a160-4d75-ab3a-14239f01ea0b
+qdhcp-7c6f9b37-76b4-463e-98d8-27e5686ed083
+qdhcp-0e62efcd-8cee-46c7-b163-d8df05c3c5ad
+列出路由器上的端口来确定公网网关的IP 地址：
+
+$ neutron router-port-list router
++--------------------------------------+------+-------------------+------------------------------------------+
+| id                                   | name | mac_address       | fixed_ips                                |
++--------------------------------------+------+-------------------+------------------------------------------+
+| bff6605d-824c-41f9-b744-21d128fc86e1 |      | fa:16:3e:2f:34:9b | {"subnet_id":                            |
+|                                      |      |                   | "3482f524-8bff-4871-80d4-5774c2730728",  |
+|                                      |      |                   | "ip_address": "172.16.1.1"}              |
+| d6fe98db-ae01-42b0-a860-37b1661f5950 |      | fa:16:3e:e8:c1:41 | {"subnet_id":                            |
+|                                      |      |                   | "5cc70da8-4ee7-4565-be53-b9c011fca011",  |
+|                                      |      |                   | "ip_address": "203.0.113.102"}           |
++--------------------------------------+------+-------------------+------------------------------------------+
+
+
+************************************
+相关验证命令：
+Keystone
+ unset OS_TOKEN OS_URL
+ openstack --os-auth-url http://controller:35357/v3 \
+  --os-project-domain-name default --os-user-domain-name default \
+  --os-project-name admin --os-username admin token issue
+ openstack --os-auth-url http://controller:5000/v3 \
+  --os-project-domain-name default --os-user-domain-name default \
+  --os-project-name demo --os-username demo token issue
+Glance       
+  openstack image list
+Nova
+ openstack compute service list
+Neutron
+ neutron ext-list
+ neutron agent-list
+ 
+
+
+
+
+
+
+openstack image list   镜像
+openstack compute service list   计算
+neutron agent-list
+openstack network list  网络
+ openstack flavor list  
+openstack server list    实例
+openstack security group list  安全组
+
+
+
+
